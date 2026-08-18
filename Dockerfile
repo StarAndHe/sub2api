@@ -25,6 +25,11 @@ ARG NPM_CONFIG_REGISTRY
 
 WORKDIR /app/frontend
 
+# Raise the JS heap ceiling: the Vite/Rollup production build peaks well above
+# Node's default old-space limit, which otherwise aborts the build with
+# "JavaScript heap out of memory" on memory-constrained build hosts.
+ENV NODE_OPTIONS=--max-old-space-size=4096
+
 # Install pnpm (pinned to v9 to match CI and keep builds reproducible)
 RUN corepack enable && corepack prepare pnpm@9 --activate
 
