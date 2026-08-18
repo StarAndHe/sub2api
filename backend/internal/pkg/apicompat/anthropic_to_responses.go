@@ -257,9 +257,7 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 // anthropicAssistantToResponses handles an Anthropic assistant message.
 // Text content → assistant message with output_text parts.
 // tool_use blocks → function_call items.
-// thinking blocks with signature → reasoning items (encrypted_content) so
-// multi-turn Grok/Codex prompt cache can reuse prior reasoning prefixes.
-// thinking without signature remains ignored (not accepted as plain text input).
+// thinking/reasoning blocks are intentionally dropped (see below).
 func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, error) {
 	// Try plain string.
 	var s string
@@ -279,24 +277,15 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 
 	var items []ResponsesInputItem
 
-	// Preserve turn order: reasoning → assistant text → tool calls. xAI/Codex
-	// multi-turn cache and tool continuations expect reasoning before the
-	// assistant message that followed it.
-	for _, b := range blocks {
-		if b.Type != "thinking" {
-			continue
-		}
-		sig := strings.TrimSpace(b.Signature)
-		// Only replay provider ciphertext. Skip GPT/Codex-style gAAAA blobs and
-		// empty placeholders — xAI returns 400 on decrypt for foreign signatures.
-		if sig == "" || strings.HasPrefix(sig, "gAAAA") {
-			continue
-		}
-		items = append(items, ResponsesInputItem{
-			Type:             "reasoning",
-			EncryptedContent: sig,
-		})
-	}
+	// Reasoning/thinking blocks are not replayed into the Responses API.
+	// When the upstream is OpenAI/ChatGPT (gpt-5.x), the encrypted_content
+	// field is validated against OpenAI's own signatures; replaying a
+	// signature produced by another provider (e.g. DeepSeek reasoning or a
+	// Claude client) makes the upstream return HTTP 400 "Encrypted content
+	// could not be decrypted or parsed", which breaks mixed-provider
+	// conversations in Anthropic-protocol clients (ZCode, etc.).
+	// Prior chain-of-thought is non-essential: the visible assistant text is
+	// preserved below, so dropping it keeps multi-turn context intact.
 
 	// Text content → assistant message with output_text content parts.
 	text := extractAnthropicTextFromBlocks(blocks)
