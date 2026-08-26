@@ -187,6 +187,35 @@ describe('AccountTestModal', () => {
     })
   })
 
+  it('只有测试成功事件才通知账号列表刷新', async () => {
+    const wrapper = mountModal({
+      id: 42,
+      name: 'OpenAI OAuth',
+      platform: 'openai',
+      type: 'oauth',
+      status: 'active'
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.emitted('succeeded')).toEqual([[42]])
+
+    global.fetch = vi.fn().mockResolvedValue(
+      createStreamResponse([
+        'data: {"type":"test_complete","success":false,"error":"rate limited"}\n'
+      ])
+    ) as any
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.emitted('succeeded')).toEqual([[42]])
+  })
+
   it('OpenAI Compact 探测会携带 compact 测试模式', async () => {
     getAvailableModels.mockResolvedValue([
       { id: 'gpt-5.4', display_name: 'GPT-5.4' }

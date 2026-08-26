@@ -397,6 +397,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void
+  (e: 'succeeded', accountId: number): void
 }>()
 
 const terminalRef = ref<HTMLElement | null>(null)
@@ -1030,6 +1031,7 @@ const handleEvent = (event: {
       }
       if (event.success) {
         status.value = 'success'
+        if (props.account?.id) emit('succeeded', props.account.id)
       } else {
         status.value = 'error'
         errorMessage.value = event.error || t('admin.accounts.testFailed')

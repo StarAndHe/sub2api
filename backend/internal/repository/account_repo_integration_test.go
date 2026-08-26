@@ -941,6 +941,75 @@ func (s *AccountRepoSuite) TestClearRateLimitIfObservedProtectsRearmed429Generat
 	s.Require().WithinDuration(rearmedReset, *retyped.RateLimitResetAt, time.Second)
 }
 
+func (s *AccountRepoSuite) TestClearOpenAIRateLimitIfObservedProtectsRearmed429Generation() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:        "acc-openai-rl-conditional-clear",
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Status:      service.StatusActive,
+		Schedulable: true,
+	})
+	firstReset := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	s.Require().NoError(s.repo.SetRateLimited(s.ctx, account.ID, firstReset))
+	observed, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+
+	newReset := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	s.Require().NoError(s.repo.SetRateLimited(s.ctx, account.ID, newReset))
+	cleared, err := s.repo.ClearRateLimitIfObserved(s.ctx, account.ID, *observed.RateLimitedAt, *observed.RateLimitResetAt)
+	s.Require().NoError(err)
+	s.Require().False(cleared)
+
+	current, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(current.RateLimitedAt)
+	s.Require().WithinDuration(newReset, *current.RateLimitResetAt, time.Second)
+
+	cleared, err = s.repo.ClearRateLimitIfObserved(s.ctx, account.ID, *current.RateLimitedAt, *current.RateLimitResetAt)
+	s.Require().NoError(err)
+	s.Require().True(cleared)
+	recovered, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Nil(recovered.RateLimitedAt)
+	s.Require().Nil(recovered.RateLimitResetAt)
+}
+
+func (s *AccountRepoSuite) TestClearOpenAIModelRateLimitIfObservedOnlyRemovesMatchingScope() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:        "acc-openai-model-rl-conditional-clear",
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Status:      service.StatusActive,
+		Schedulable: true,
+	})
+	solReset := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	terraReset := time.Now().Add(45 * time.Minute).UTC().Truncate(time.Second)
+	s.Require().NoError(s.repo.SetModelRateLimit(s.ctx, account.ID, "gpt-5.6-sol", solReset))
+	s.Require().NoError(s.repo.SetModelRateLimit(s.ctx, account.ID, "gpt-5.6-terra", terraReset))
+	observed, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+
+	rawLimits := observed.Extra["model_rate_limits"].(map[string]any)
+	sol := rawLimits["gpt-5.6-sol"].(map[string]any)
+	limitedAt, err := time.Parse(time.RFC3339, sol["rate_limited_at"].(string))
+	s.Require().NoError(err)
+	resetAt, err := time.Parse(time.RFC3339, sol["rate_limit_reset_at"].(string))
+	s.Require().NoError(err)
+
+	cleared, err := s.repo.ClearModelRateLimitIfObserved(s.ctx, account.ID, "gpt-5.6-sol", limitedAt, resetAt)
+	s.Require().NoError(err)
+	s.Require().True(cleared)
+	current, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	currentLimits := current.Extra["model_rate_limits"].(map[string]any)
+	s.Require().NotContains(currentLimits, "gpt-5.6-sol")
+	s.Require().Contains(currentLimits, "gpt-5.6-terra")
+
+	cleared, err = s.repo.ClearModelRateLimitIfObserved(s.ctx, account.ID, "gpt-5.6-terra", limitedAt, resetAt)
+	s.Require().NoError(err)
+	s.Require().False(cleared)
+}
+
 func (s *AccountRepoSuite) TestClearRateLimit() {
 	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "acc-clear"})
 	until := time.Now().Add(1 * time.Hour)

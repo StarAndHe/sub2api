@@ -165,6 +165,28 @@ func antigravityModelRateLimitKeys(model string) []string {
 	return keys
 }
 
+func (a *Account) modelRateLimitGeneration(scope string) (time.Time, time.Time, bool) {
+	if a == nil || a.Extra == nil || scope == "" {
+		return time.Time{}, time.Time{}, false
+	}
+	rawLimits, ok := a.Extra[modelRateLimitsKey].(map[string]any)
+	if !ok {
+		return time.Time{}, time.Time{}, false
+	}
+	rawLimit, ok := rawLimits[scope].(map[string]any)
+	if !ok {
+		return time.Time{}, time.Time{}, false
+	}
+	limitedAtRaw, _ := rawLimit["rate_limited_at"].(string)
+	resetAtRaw, _ := rawLimit["rate_limit_reset_at"].(string)
+	limitedAt, limitedErr := time.Parse(time.RFC3339, strings.TrimSpace(limitedAtRaw))
+	resetAt, resetErr := time.Parse(time.RFC3339, strings.TrimSpace(resetAtRaw))
+	if limitedErr != nil || resetErr != nil {
+		return time.Time{}, time.Time{}, false
+	}
+	return limitedAt, resetAt, true
+}
+
 func (a *Account) modelRateLimitResetAt(scope string) *time.Time {
 	if a == nil || a.Extra == nil || scope == "" {
 		return nil

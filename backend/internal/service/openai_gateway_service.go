@@ -24,6 +24,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -462,6 +463,9 @@ type OpenAIGatewayService struct {
 	codexModelsManifestCache            codexModelsManifestCache
 	openaiCompatSessionResponses        sync.Map
 	openaiCompatAnthropicDigestSessions sync.Map
+	openaiRateLimitRecoveryFlight       singleflight.Group
+	openaiRateLimitRecoveryProbeAt      sync.Map // key: int64(accountID), value: time.Time
+	openaiRateLimitRecoveryProbeLocks   sync.Map // key: int64(accountID), value: *sync.Mutex
 }
 
 // NewOpenAIGatewayService creates a new OpenAIGatewayService

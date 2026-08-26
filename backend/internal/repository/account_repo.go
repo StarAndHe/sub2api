@@ -2170,15 +2170,17 @@ func (r *accountRepository) SetRateLimitedIfLater(ctx context.Context, id int64,
 	return nil
 }
 
-// ClearRateLimitIfObserved clears exactly the Grok rate-limit generation seen
+// ClearRateLimitIfObserved clears exactly the OAuth rate-limit generation seen
 // by a successful request. Matching both timestamps prevents a stale success
 // from erasing a later clear/re-arm generation with an equal or shorter reset.
 func (r *accountRepository) ClearRateLimitIfObserved(ctx context.Context, id int64, observedLimitedAt, observedResetAt time.Time) (bool, error) {
 	updated, err := r.client.Account.Update().
 		Where(
 			dbaccount.IDEQ(id),
-			dbaccount.PlatformEQ(service.PlatformGrok),
+			dbaccount.PlatformIn(service.PlatformOpenAI, service.PlatformGrok),
 			dbaccount.TypeEQ(service.AccountTypeOAuth),
+			dbaccount.StatusEQ(service.StatusActive),
+			dbaccount.SchedulableEQ(true),
 			dbaccount.RateLimitedAtEQ(observedLimitedAt),
 			dbaccount.RateLimitResetAtEQ(observedResetAt),
 		).
@@ -2250,6 +2252,62 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 	}
 	r.syncSchedulerAccountSnapshot(ctx, id)
 	return nil
+}
+
+func (r *accountRepository) ClearModelRateLimitIfObserved(
+	ctx context.Context,
+	id int64,
+	scope string,
+	observedLimitedAt time.Time,
+	observedResetAt time.Time,
+) (bool, error) {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return false, nil
+	}
+
+	result, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+			UPDATE accounts
+			SET extra = jsonb_set(
+				COALESCE(extra, '{}'::jsonb),
+				'{model_rate_limits}'::text[],
+				COALESCE(extra->'model_rate_limits', '{}'::jsonb) - $1,
+				true
+			),
+			updated_at = NOW()
+			WHERE id = $2
+				AND deleted_at IS NULL
+				AND platform = $3
+				AND type = $4
+				AND status = $5
+				AND schedulable IS TRUE
+				AND extra #>> ARRAY['model_rate_limits', $1, 'rate_limited_at'] = $6
+				AND extra #>> ARRAY['model_rate_limits', $1, 'rate_limit_reset_at'] = $7
+			RETURNING id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $8, updated.id, NULL, NULL FROM updated
+	`,
+		scope,
+		id,
+		service.PlatformOpenAI,
+		service.AccountTypeOAuth,
+		service.StatusActive,
+		observedLimitedAt.UTC().Format(time.RFC3339),
+		observedResetAt.UTC().Format(time.RFC3339),
+		service.SchedulerOutboxEventAccountChanged,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
+		r.syncSchedulerAccountSnapshot(ctx, id)
+		return false, err
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return true, nil
 }
 
 func (r *accountRepository) SetOverloaded(ctx context.Context, id int64, until time.Time) error {
