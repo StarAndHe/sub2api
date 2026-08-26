@@ -173,7 +173,7 @@ func TestAnthropicToResponses_ThinkingWithoutSignatureIgnored(t *testing.T) {
 	assert.Equal(t, "Hi!", parts[0].Text)
 }
 
-func TestAnthropicToResponses_ThinkingSignatureBecomesReasoning(t *testing.T) {
+func TestAnthropicToResponses_ThinkingSignatureIgnored(t *testing.T) {
 	req := &AnthropicRequest{
 		Model:     "grok-4.5",
 		MaxTokens: 1024,
@@ -189,12 +189,11 @@ func TestAnthropicToResponses_ThinkingSignatureBecomesReasoning(t *testing.T) {
 
 	var items []ResponsesInputItem
 	require.NoError(t, json.Unmarshal(resp.Input, &items))
-	// user + reasoning + assistant text + function_call + function_call_output
-	require.GreaterOrEqual(t, len(items), 4)
-	assert.Equal(t, "reasoning", items[1].Type)
-	assert.Equal(t, "enc-rs-1", items[1].EncryptedContent)
-	assert.Equal(t, "assistant", items[2].Role)
-	assert.Equal(t, "function_call", items[3].Type)
+	// Foreign reasoning signatures are not replayed; visible text and tool context remain.
+	require.Len(t, items, 4)
+	assert.Equal(t, "assistant", items[1].Role)
+	assert.Equal(t, "function_call", items[2].Type)
+	assert.Equal(t, "function_call_output", items[3].Type)
 }
 
 func TestAnthropicToResponses_MaxTokensFloor(t *testing.T) {

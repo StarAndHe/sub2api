@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -169,7 +168,11 @@ func (s *OpenAIGatewayService) isStaleOpenAIRateLimitRecoveryCandidate(
 	if account.TempUnschedulableUntil != nil && now.Before(*account.TempUnschedulableUntil) {
 		return false
 	}
-	if s.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel) {
+	runtimeBlock := s.openAIAccountRuntimeBlockSnapshot(account)
+	if runtimeBlock.blocked && runtimeBlock.reason != "429" {
+		return false
+	}
+	if s.isOpenAIAccountModelRuntimeBlocked(account, req.RequestedModel) {
 		return false
 	}
 	if !account.IsModelSupported(req.RequestedModel) {
@@ -214,6 +217,7 @@ func (s *OpenAIGatewayService) probeAndRecoverOpenAIAccount(
 	observedLimitedAt := account.RateLimitedAt
 	observedResetAt := account.RateLimitResetAt
 	observedModelLimits := observedOpenAIModelRateLimits(ctx, account, requestedModel, time.Now())
+	observedRuntimeBlock := s.openAIAccountRuntimeBlockSnapshot(account)
 
 	probeCtx, cancel := context.WithTimeout(ctx, openAIStaleRateLimitRecoveryTimeout)
 	defer cancel()
@@ -295,8 +299,8 @@ func (s *OpenAIGatewayService) probeAndRecoverOpenAIAccount(
 			recovered = recovered || cleared
 		}
 	}
-	if recovered {
-		s.ClearAccountSchedulingBlock(account.ID)
+	if recovered && observedRuntimeBlock.reason == "429" {
+		s.clearOpenAIAccountRuntimeBlockIfObserved(account.ID, observedRuntimeBlock)
 	}
 	return recovered, nil
 }
@@ -314,8 +318,4 @@ func observedOpenAIModelRateLimits(ctx context.Context, account *Account, reques
 		result = append(result, openAIObservedModelRateLimit{scope: scope, limitedAt: limitedAt, resetAt: resetAt})
 	}
 	return result
-}
-
-func isNoAvailableOpenAIAccountError(err error) bool {
-	return errors.Is(err, ErrNoAvailableAccounts)
 }

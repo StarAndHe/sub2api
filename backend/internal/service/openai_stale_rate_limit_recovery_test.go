@@ -83,7 +83,17 @@ func TestOpenAIStaleRateLimitRecoveryCandidateRequiresOnlyRateLimitBlock(t *test
 		t.Fatal("overloaded account must not be probed by stale 429 recovery")
 	}
 
+	svc.BlockAccountScheduling(&base, now.Add(time.Hour), "429")
+	if !svc.isStaleOpenAIRateLimitRecoveryCandidate(context.Background(), &base, req, now) {
+		t.Fatal("429 runtime block must remain eligible for stale rate-limit recovery")
+	}
+	svc.BlockAccountScheduling(&base, now.Add(2*time.Hour), "oauth_401")
+	if svc.isStaleOpenAIRateLimitRecoveryCandidate(context.Background(), &base, req, now) {
+		t.Fatal("non-429 runtime block must not be probed")
+	}
+
 	unsupportedAccount := base
+	unsupportedAccount.ID = 2
 	unsupportedAccount.Credentials = map[string]any{"model_mapping": map[string]any{"gpt-5.5": "gpt-5.5"}}
 	if svc.isStaleOpenAIRateLimitRecoveryCandidate(context.Background(), &unsupportedAccount, req, now) {
 		t.Fatal("model-incompatible account must not be probed")
@@ -169,14 +179,15 @@ func TestProbeAndRecoverOpenAIAccountRequiresCompletedStream(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			repo := &staleRecoveryRepo{}
+			probeAccount := *account
+			repo := &staleRecoveryRepo{stubOpenAIAccountRepo: stubOpenAIAccountRepo{accounts: []Account{probeAccount}}}
 			upstream := &staleRecoveryUpstream{response: &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     make(http.Header),
 				Body:       io.NopCloser(strings.NewReader(tt.stream)),
 			}}
 			svc := &OpenAIGatewayService{accountRepo: repo, httpUpstream: upstream}
-			recovered, err := svc.probeAndRecoverOpenAIAccount(context.Background(), account, "gpt-5.6-sol")
+			recovered, err := svc.probeAndRecoverOpenAIAccount(context.Background(), &probeAccount, "gpt-5.6-sol")
 			if err != nil {
 				t.Fatalf("probeAndRecoverOpenAIAccount() error = %v", err)
 			}
