@@ -222,4 +222,42 @@ describe('AccountStatusIndicator', () => {
     // AICredits 积分耗尽状态应显示
     expect(wrapper.text()).toContain('admin.accounts.status.creditsExhausted')
   })
+
+  it('OpenAI token_expired error displays recoverable auth state', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          platform: 'openai',
+          type: 'oauth',
+          status: 'error',
+          error_message: 'token_expired: access token expired'
+        })
+      },
+      global: {
+        stubs: { Icon: true }
+      }
+    })
+
+    expect(wrapper.text()).toContain('admin.accounts.status.recoverableAuthExpired')
+    expect(wrapper.find('.badge-warning').exists()).toBe(true)
+  })
+
+  it('revoked OpenAI auth error displays needs re-login state', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          platform: 'openai',
+          type: 'oauth',
+          status: 'error',
+          error_message: 'token_revoked: token was revoked'
+        })
+      },
+      global: {
+        stubs: { Icon: true }
+      }
+    })
+
+    expect(wrapper.text()).toContain('admin.accounts.status.needsReauth')
+    expect(wrapper.find('.badge-danger').exists()).toBe(true)
+  })
 })

@@ -98,6 +98,7 @@ export default {
       columns: {
         name: '名称',
         id: '账号ID',
+        membership: '会员',
         platformType: '平台/类型',
         platform: '平台',
         type: '类型',
@@ -222,6 +223,9 @@ export default {
       setPrivacy: '设置隐私',
       subscriptionAbnormal: '异常',
       subscriptionExpires: '到期',
+      membership: {
+        unknown: '未知'
+      },
       // 容量状态提示
       capacity: {
         windowCost: {
@@ -340,6 +344,8 @@ export default {
         rateLimited: '限流中',
         overloaded: '过载中',
         tempUnschedulable: '临时不可调度',
+        recoverableAuthExpired: '可恢复鉴权过期',
+        needsReauth: '需要重新登录',
         quotaExceeded: '配额超限',
         unschedulable: '不可调度',
         rateLimitedUntil: '限流中，当前不参与调度，预计 {time} 自动恢复',

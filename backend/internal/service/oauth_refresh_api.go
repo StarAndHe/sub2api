@@ -34,6 +34,15 @@ type GrokOAuthRefreshSuccessRepository interface {
 	) (bool, error)
 }
 
+type OpenAIOAuthRefreshSuccessRepository interface {
+	UpdateOpenAIOAuthCredentialsAndClearAuthErrorIfUnchanged(
+		ctx context.Context,
+		id int64,
+		expectedCredentials map[string]any,
+		credentials map[string]any,
+	) (bool, error)
+}
+
 const (
 	defaultRefreshLockTTL                   = 60 * time.Second
 	defaultRefreshLockReleaseTimeout        = 2 * time.Second
@@ -109,6 +118,18 @@ type OAuthRefreshResult struct {
 	LockHeld       bool           // 锁被其他 worker 持有（未执行刷新）
 }
 
+type oauthRefreshOptions struct {
+	Force bool
+}
+
+type OAuthRefreshOption func(*oauthRefreshOptions)
+
+func WithOAuthRefreshForce() OAuthRefreshOption {
+	return func(options *oauthRefreshOptions) {
+		options.Force = true
+	}
+}
+
 func snapshotOAuthRefreshAccount(account *Account) *Account {
 	if account == nil {
 		return nil
@@ -170,7 +191,14 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	account *Account,
 	executor OAuthRefreshExecutor,
 	refreshWindow time.Duration,
+	optionFns ...OAuthRefreshOption,
 ) (*OAuthRefreshResult, error) {
+	options := oauthRefreshOptions{}
+	for _, apply := range optionFns {
+		if apply != nil {
+			apply(&options)
+		}
+	}
 	if api == nil || api.accountRepo == nil {
 		return nil, errors.New("oauth refresh account repository is not configured")
 	}
@@ -225,7 +253,7 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	if freshAccount.ID != account.ID {
 		return nil, fmt.Errorf("%w: account identity mismatch", errOAuthRefreshAccountRereadFailed)
 	}
-	if !freshAccount.IsActive() {
+	if !freshAccount.IsActive() && !options.Force {
 		if requestPath {
 			return nil, fmt.Errorf("%w: account is not active", errOAuthRefreshAccountStateChanged)
 		}
@@ -247,7 +275,7 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	}
 
 	// 3. 二次检查是否仍需刷新（另一条路径可能已刷新）
-	if !executor.NeedsRefresh(freshAccount, refreshWindow) {
+	if !options.Force && !executor.NeedsRefresh(freshAccount, refreshWindow) {
 		return &OAuthRefreshResult{
 			Account: freshAccount,
 		}, nil
@@ -350,6 +378,45 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 			// while the provider call was in flight. Return the durable row so
 			// post-refresh cache publication cannot restore that stale snapshot.
 			freshAccount = durableAccount
+		} else if freshAccount.Platform == PlatformOpenAI && freshAccount.Type == AccountTypeOAuth {
+
+			conditionalRepo, ok := api.accountRepo.(OpenAIOAuthRefreshSuccessRepository)
+			if !ok {
+				return nil, &providerConfigurationRefreshError{
+					err: fmt.Errorf("OpenAI OAuth refresh success CAS repository is not configured"),
+				}
+			}
+			applied, updateErr := conditionalRepo.UpdateOpenAIOAuthCredentialsAndClearAuthErrorIfUnchanged(
+				ctx,
+				freshAccount.ID,
+				attemptedAccount.Credentials,
+				newCredentials,
+			)
+			if updateErr != nil {
+				slog.Error("oauth_refresh_update_failed",
+					"account_id", freshAccount.ID,
+					"platform", freshAccount.Platform,
+					"error", updateErr,
+				)
+				return nil, fmt.Errorf("%w: %v", errOAuthRefreshCredentialPersist, updateErr)
+			}
+			currentAccount, readErr := api.accountRepo.GetByID(ctx, freshAccount.ID)
+			if readErr != nil || currentAccount == nil {
+				if readErr == nil {
+					readErr = fmt.Errorf("account not found after OpenAI OAuth success CAS")
+				}
+				return nil, &providerCycleContainmentRefreshError{
+					err: fmt.Errorf("OpenAI OAuth success CAS state is unavailable: %w", readErr),
+				}
+			}
+			if !applied {
+				slog.Info("oauth_refresh_success_cas_skipped_stale_credentials",
+					"account_id", freshAccount.ID,
+					"platform", freshAccount.Platform,
+				)
+				return &OAuthRefreshResult{Account: currentAccount}, nil
+			}
+			freshAccount = currentAccount
 		} else if updateErr := persistAccountCredentials(ctx, api.accountRepo, freshAccount, newCredentials); updateErr != nil {
 			slog.Error("oauth_refresh_update_failed",
 				"account_id", freshAccount.ID,
@@ -357,6 +424,7 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 			)
 			return nil, fmt.Errorf("%w: %v", errOAuthRefreshCredentialPersist, updateErr)
 		}
+
 	}
 
 	if requestPath && freshAccount.Platform == PlatformGrok {

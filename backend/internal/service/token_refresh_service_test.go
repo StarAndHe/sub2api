@@ -34,6 +34,7 @@ type tokenRefreshAccountRepo struct {
 	conditionalErrorErr          error
 	conditionalTempErr           error
 	conditionalSuccessErr        error
+	openAISuccessCASCalls        int
 	snapshotReads                bool
 	respectReadContext           bool
 	getByIDCalls                 int
@@ -249,6 +250,32 @@ func (r *tokenRefreshAccountRepo) UpdateGrokOAuthCredentialsIfUnchanged(
 	if r.cancelOnUpdate != nil {
 		r.cancelOnUpdate()
 	}
+	return true, nil
+}
+
+func (r *tokenRefreshAccountRepo) UpdateOpenAIOAuthCredentialsAndClearAuthErrorIfUnchanged(
+	_ context.Context,
+	id int64,
+	expectedCredentials map[string]any,
+	credentials map[string]any,
+) (bool, error) {
+	r.openAISuccessCASCalls++
+	if r.conditionalSuccessErr != nil {
+		return false, r.conditionalSuccessErr
+	}
+	account := r.accountsByID[id]
+	if account == nil || account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth ||
+		!reflect.DeepEqual(account.Credentials, expectedCredentials) {
+		return false, nil
+	}
+	r.updateCalls++
+	r.updateCredentialsCalls++
+	account.Credentials = shallowCopyMap(credentials)
+	account.Status = StatusActive
+	account.ErrorMessage = ""
+	account.TempUnschedulableUntil = nil
+	account.TempUnschedulableReason = ""
+	r.lastAccount = account
 	return true, nil
 }
 
@@ -1627,4 +1654,58 @@ func TestPathA_DBUpdateFailed(t *testing.T) {
 	require.ErrorIs(t, err, errOAuthRefreshCredentialPersist)
 	require.Equal(t, 1, repo.updateCalls)  // DB 更新被尝试
 	require.Equal(t, 0, invalidator.calls) // DB 失败时不应触发缓存失效
+}
+
+type recoverableAuthPagerStub struct {
+	lastOptions OAuthRefreshPageOptions
+	page        *OAuthRefreshCandidatePage
+	err         error
+}
+
+func (p *recoverableAuthPagerStub) ListOAuthRefreshCandidatePage(ctx context.Context, options OAuthRefreshPageOptions) (*OAuthRefreshCandidatePage, error) {
+	p.lastOptions = options
+	return p.page, p.err
+}
+
+func TestTokenRefreshService_ProcessRecoverableOpenAIAuthErrorsForceRefreshesErrorAccount(t *testing.T) {
+	account := Account{
+		ID:           501,
+		Platform:     PlatformOpenAI,
+		Type:         AccountTypeOAuth,
+		Status:       StatusError,
+		ErrorMessage: "token_expired: access token expired",
+		Credentials:  map[string]any{"access_token": "old", "refresh_token": "rt", "_token_version": int64(1)},
+	}
+	repo := &tokenRefreshAccountRepo{}
+	repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(&account)}
+	pager := &recoverableAuthPagerStub{
+		page: &OAuthRefreshCandidatePage{
+			Accounts:    []Account{account},
+			NextAfterID: account.ID,
+		},
+	}
+	cache := &mockTokenCacheForRefreshAPI{lockResult: true}
+	service, refresher := buildPathAService(repo, cache, &tokenCacheInvalidatorStub{})
+	service.candidatePager = pager
+	refresher.credentials = map[string]any{"access_token": "new", "refresh_token": "rt2"}
+	state := &tokenRefreshProviderState{
+		registration: tokenRefreshRegistration{
+			platform:  PlatformOpenAI,
+			refresher: refresher,
+			executor:  refresher,
+		},
+	}
+
+	service.processRecoverableOpenAIAuthErrors(context.Background(), map[string]*tokenRefreshProviderState{PlatformOpenAI: state}, time.Hour, 25)
+
+	require.Equal(t, []string{PlatformOpenAI}, pager.lastOptions.Platforms)
+	require.False(t, pager.lastOptions.ActiveOnly)
+	require.True(t, pager.lastOptions.RequireRefreshToken)
+	require.True(t, pager.lastOptions.OpenAIRecoverableAuthErrorOnly)
+	require.Equal(t, 1, refresher.calls, "force option must bypass NeedsRefresh=false for error accounts")
+	require.Equal(t, 1, repo.openAISuccessCASCalls)
+	require.Equal(t, StatusActive, repo.accountsByID[account.ID].Status)
+	require.Empty(t, repo.accountsByID[account.ID].ErrorMessage)
+	require.Equal(t, "new", repo.accountsByID[account.ID].GetCredential("access_token"))
+	require.Zero(t, service.recoverableAuthCandidateAfterID())
 }

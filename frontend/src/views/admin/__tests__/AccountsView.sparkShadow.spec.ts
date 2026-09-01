@@ -4,6 +4,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import AccountsView from '../AccountsView.vue'
 import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
+import AccountMembershipBadge from '@/components/account/AccountMembershipBadge.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 
@@ -94,6 +95,7 @@ const mountView = () =>
         EditAccountModal: true,
         BulkEditAccountModal: true,
         PlatformTypeBadge: true,
+        AccountMembershipBadge: true,
         AccountCapacityCell: true,
         AccountStatusIndicator: true,
         AccountTodayStatsCell: true,
@@ -223,6 +225,8 @@ const mountViewWithRow = () =>
           template: `<div>
             <div v-for="(row, idx) in (data || [])" :key="idx">
               <slot name="cell-name" :row="row" :value="row.name" />
+              <slot name="cell-status" :row="row" />
+              <slot name="cell-membership" :row="row" />
               <slot name="cell-platform_type" :row="row" />
             </div>
           </div>`
@@ -246,6 +250,7 @@ const mountViewWithRow = () =>
         EditAccountModal: true,
         BulkEditAccountModal: true,
         PlatformTypeBadge: true,
+        AccountMembershipBadge: true,
         AccountCapacityCell: true,
         AccountStatusIndicator: true,
         AccountTodayStatsCell: true,
@@ -273,7 +278,7 @@ describe('admin AccountsView — 账号行展示', () => {
     vi.unstubAllGlobals()
   })
 
-  it('影子行 email 单元格显示 parent_email，PlatformTypeBadge 接收 parent_plan_type/parent_privacy_mode', async () => {
+  it('影子行 email 单元格显示 parent_email，会员列接收 parent_plan_type/parent_privacy_mode', async () => {
     const shadowAccount = {
       id: 100,
       name: '影子账号',
@@ -295,12 +300,18 @@ describe('admin AccountsView — 账号行展示', () => {
     // 1. email 单元格通过 OR 兜底渲染 parent_email
     expect(wrapper.text()).toContain('parent@example.com')
 
-    // 2. PlatformTypeBadge 收到 parent_plan_type 和 parent_privacy_mode
-    const badge = wrapper.findComponent(PlatformTypeBadge)
-    expect(badge.exists()).toBe(true)
-    expect(badge.props('planType')).toBe('plus')
-    expect(badge.props('privacyMode')).toBe('false')
-    expect(badge.props('subscriptionExpiresAt')).toBe('2027-01-01T00:00:00Z')
+    // 2. 平台列不再混入会员信息，会员列收到 parent_plan_type 和 parent_privacy_mode
+    const platformBadge = wrapper.findComponent(PlatformTypeBadge)
+    expect(platformBadge.exists()).toBe(true)
+    expect(platformBadge.props('planType')).toBeUndefined()
+    expect(platformBadge.props('privacyMode')).toBeUndefined()
+    expect(platformBadge.props('showPlan')).toBe(false)
+
+    const membershipBadge = wrapper.findComponent(AccountMembershipBadge)
+    expect(membershipBadge.exists()).toBe(true)
+    expect(membershipBadge.props('planType')).toBe('plus')
+    expect(membershipBadge.props('privacyMode')).toBe('false')
+    expect(membershipBadge.props('subscriptionExpiresAt')).toBe('2027-01-01T00:00:00Z')
 
     wrapper.unmount()
   })
@@ -409,8 +420,11 @@ describe('admin AccountsView — 账号行展示', () => {
     const wrapper = mountViewWithRow()
     await flushPromises()
 
-    const badges = wrapper.findAllComponents(PlatformTypeBadge)
-    expect(badges.map((badge) => badge.props('planType'))).toEqual([
+    const platformBadges = wrapper.findAllComponents(PlatformTypeBadge)
+    expect(platformBadges.every((badge) => badge.props('showPlan') === false)).toBe(true)
+
+    const membershipBadges = wrapper.findAllComponents(AccountMembershipBadge)
+    expect(membershipBadges.map((badge) => badge.props('planType'))).toEqual([
       'SuperGrok',
       'SuperGrok Heavy',
       'SuperGrok',

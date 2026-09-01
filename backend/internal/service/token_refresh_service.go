@@ -70,16 +70,17 @@ type TokenRefreshService struct {
 	privacyClientFactory PrivacyClientFactory
 	proxyRepo            ProxyRepository
 
-	stopCh        chan struct{}
-	stopOnce      sync.Once
-	wg            sync.WaitGroup
-	runCtx        context.Context
-	runCancel     context.CancelFunc
-	candidateMu   sync.Mutex
-	afterID       int64
-	providerMu    sync.Mutex
-	providerGates map[string]*tokenRefreshRateGate
-	providerPools map[string]*tokenRefreshConcurrencyGate
+	stopCh                 chan struct{}
+	stopOnce               sync.Once
+	wg                     sync.WaitGroup
+	runCtx                 context.Context
+	runCancel              context.CancelFunc
+	candidateMu            sync.Mutex
+	afterID                int64
+	recoverableAuthAfterID int64
+	providerMu             sync.Mutex
+	providerGates          map[string]*tokenRefreshRateGate
+	providerPools          map[string]*tokenRefreshConcurrencyGate
 
 	// Test-only duration seam; production uses TokenRefreshConfig seconds.
 	attemptTimeoutOverride time.Duration
@@ -161,6 +162,18 @@ func (s *TokenRefreshService) candidateAfterID() int64 {
 func (s *TokenRefreshService) setCandidateAfterID(afterID int64) {
 	s.candidateMu.Lock()
 	s.afterID = afterID
+	s.candidateMu.Unlock()
+}
+
+func (s *TokenRefreshService) recoverableAuthCandidateAfterID() int64 {
+	s.candidateMu.Lock()
+	defer s.candidateMu.Unlock()
+	return s.recoverableAuthAfterID
+}
+
+func (s *TokenRefreshService) setRecoverableAuthCandidateAfterID(afterID int64) {
+	s.candidateMu.Lock()
+	s.recoverableAuthAfterID = afterID
 	s.candidateMu.Unlock()
 }
 
@@ -547,10 +560,11 @@ func (s *TokenRefreshService) processRefreshContext(parent context.Context) {
 			s.setCandidateAfterID(0)
 			break
 		}
-		if page.NextAfterID <= afterID {
+		if len(accounts) > 0 && page.NextAfterID <= afterID {
 			slog.Error("token_refresh.invalid_candidate_page_metadata", "after_id", afterID)
 			break
 		}
+
 		if !isStrictlyIncreasingAccountPage(accounts, afterID) {
 			slog.Error("token_refresh.invalid_candidate_page", "after_id", afterID, "count", len(accounts))
 			break
@@ -577,7 +591,10 @@ func (s *TokenRefreshService) processRefreshContext(parent context.Context) {
 		}
 	}
 
+	s.processRecoverableOpenAIAuthErrors(ctx, providerStates, refreshWindow, pageSize)
+
 	if stats.needsRefresh == 0 && stats.failed == 0 {
+
 		slog.Debug("token_refresh.cycle_completed",
 			"total", stats.total, "oauth", stats.oauth,
 			"needs_refresh", stats.needsRefresh, "refreshed", stats.refreshed,
@@ -599,6 +616,70 @@ func isStrictlyIncreasingAccountPage(accounts []Account, afterID int64) bool {
 		previous = accounts[i].ID
 	}
 	return true
+}
+
+func (s *TokenRefreshService) processRecoverableOpenAIAuthErrors(
+	ctx context.Context,
+	providerStates map[string]*tokenRefreshProviderState,
+	refreshWindow time.Duration,
+	pageSize int,
+) {
+	if ctx.Err() != nil {
+		return
+	}
+	pager := s.candidatePager
+	if pager == nil {
+		pager, _ = s.accountRepo.(OAuthRefreshCandidatePager)
+	}
+	if pager == nil {
+		return
+	}
+	state := providerStates[PlatformOpenAI]
+	if state == nil || state.registration.refresher == nil || state.registration.executor == nil {
+		return
+	}
+	afterID := s.recoverableAuthCandidateAfterID()
+	page, err := pager.ListOAuthRefreshCandidatePage(ctx, OAuthRefreshPageOptions{
+		Platforms:                      []string{PlatformOpenAI},
+		AfterID:                        afterID,
+		Limit:                          pageSize,
+		ActiveOnly:                     false,
+		IncludeSetupToken:              false,
+		RequireRefreshToken:            true,
+		ExcludeRetryCooldown:           true,
+		OpenAIRecoverableAuthErrorOnly: true,
+	})
+	if err != nil {
+		slog.Error("token_refresh.recoverable_auth_error_list_failed", "error", err, "after_id", afterID)
+		return
+	}
+	if page == nil || len(page.Accounts) == 0 {
+		s.setRecoverableAuthCandidateAfterID(0)
+		return
+	}
+	if page.NextAfterID <= afterID || !isStrictlyIncreasingAccountPage(page.Accounts, afterID) {
+		slog.Error("token_refresh.invalid_recoverable_auth_error_page", "after_id", afterID, "count", len(page.Accounts))
+		return
+	}
+	refreshed, skipped, failed := s.processProviderAccountsWithOptions(ctx, state, accountPointers(page.Accounts), refreshWindow, WithOAuthRefreshForce())
+	slog.Info("token_refresh.recoverable_auth_error_cycle_completed",
+		"total", len(page.Accounts), "refreshed", refreshed, "skipped", skipped, "failed", failed)
+	if ctx.Err() != nil {
+		return
+	}
+	if page.HasMore {
+		s.setRecoverableAuthCandidateAfterID(page.NextAfterID)
+	} else {
+		s.setRecoverableAuthCandidateAfterID(0)
+	}
+}
+
+func accountPointers(accounts []Account) []*Account {
+	out := make([]*Account, 0, len(accounts))
+	for i := range accounts {
+		out = append(out, &accounts[i])
+	}
+	return out
 }
 
 func (s *TokenRefreshService) processCandidatePage(
@@ -655,6 +736,16 @@ func (s *TokenRefreshService) processProviderAccounts(
 	accounts []*Account,
 	refreshWindow time.Duration,
 ) (refreshed, skipped, failed int) {
+	return s.processProviderAccountsWithOptions(ctx, state, accounts, refreshWindow)
+}
+
+func (s *TokenRefreshService) processProviderAccountsWithOptions(
+	ctx context.Context,
+	state *tokenRefreshProviderState,
+	accounts []*Account,
+	refreshWindow time.Duration,
+	options ...OAuthRefreshOption,
+) (refreshed, skipped, failed int) {
 	if state == nil || len(accounts) == 0 {
 		return 0, 0, 0
 	}
@@ -682,7 +773,8 @@ func (s *TokenRefreshService) processProviderAccounts(
 					results <- refreshResult{accountID: account.ID, err: errRefreshSkipped}
 					continue
 				}
-				err := s.refreshWithRetryWithRateGate(ctx, account, state.registration.refresher, state.registration.executor, refreshWindow, state)
+				err := s.refreshWithRetryWithRateGate(ctx, account, state.registration.refresher, state.registration.executor, refreshWindow, state, options...)
+
 				state.recordResult(err)
 				results <- refreshResult{accountID: account.ID, err: err}
 			}
@@ -835,6 +927,7 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 	executor OAuthRefreshExecutor,
 	refreshWindow time.Duration,
 	gate refreshAttemptGate,
+	options ...OAuthRefreshOption,
 ) error {
 	var lastErr error
 	maxRetries := s.maxRetries()
@@ -874,7 +967,8 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 					acquireRate:          acquireRate,
 				}
 			}
-			result, refreshErr := s.refreshAPI.RefreshIfNeeded(attemptCtx, account, actualExecutor, refreshWindow)
+			result, refreshErr := s.refreshAPI.RefreshIfNeeded(attemptCtx, account, actualExecutor, refreshWindow, options...)
+
 			if result != nil && result.Account != nil {
 				account = result.Account
 			}

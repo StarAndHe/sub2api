@@ -25,12 +25,12 @@ func (r *dbFallbackRepoStub) GetByID(ctx context.Context, id int64) (*Account, e
 	return nil, nil // not found, no error
 }
 
-func TestCheckErrorPolicy_401_DBFallback_Escalates(t *testing.T) {
+func TestCheckErrorPolicy_401_DBFallback_StaysTempUnschedulable(t *testing.T) {
 	// Scenario: cache account has empty TempUnschedulableReason (cache miss),
 	// but DB account has a previous 401 record.
-	// Non-Antigravity: should escalate to ErrorPolicyNone (second 401 = permanent error).
-	// Antigravity: skips escalation logic (401 handled by applyErrorPolicy rules).
-	t.Run("gemini_escalates", func(t *testing.T) {
+	// Repeated 401 no longer escalates directly to permanent error; recoverable OAuth
+	// accounts should stay temporarily unschedulable so refresh can repair them.
+	t.Run("gemini_stays_temp", func(t *testing.T) {
 		repo := &dbFallbackRepoStub{
 			dbAccount: &Account{
 				ID:                      20,
@@ -57,7 +57,7 @@ func TestCheckErrorPolicy_401_DBFallback_Escalates(t *testing.T) {
 		}
 
 		result := svc.CheckErrorPolicy(context.Background(), account, http.StatusUnauthorized, []byte(`unauthorized`))
-		require.Equal(t, ErrorPolicyNone, result, "gemini 401 with DB fallback showing previous 401 should escalate")
+		require.Equal(t, ErrorPolicyTempUnscheduled, result, "gemini 401 with DB fallback showing previous 401 should stay temporary")
 	})
 
 	t.Run("antigravity_stays_temp", func(t *testing.T) {

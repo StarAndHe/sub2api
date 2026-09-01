@@ -25,6 +25,11 @@ type rateLimitAccountRepoStub struct {
 	lastTempReason         string
 	lastErrorID            int64
 	lastTempID             int64
+	expireCalls            int
+	expireApplied          bool
+	expireConfigured       bool
+	expireErr              error
+	lastExpireCredentials  map[string]any
 }
 
 func (r *rateLimitAccountRepoStub) SetError(ctx context.Context, id int64, errorMsg string) error {
@@ -51,6 +56,22 @@ func (r *rateLimitAccountRepoStub) UpdateExtra(ctx context.Context, id int64, up
 	r.updateExtraCalls++
 	r.lastExtraUpdates = shallowCopyMap(updates)
 	return nil
+}
+
+func (r *rateLimitAccountRepoStub) ExpireOpenAIOAuthCredentialsIfUnchanged(
+	ctx context.Context,
+	id int64,
+	expectedCredentials map[string]any,
+) (bool, error) {
+	r.expireCalls++
+	r.lastExpireCredentials = shallowCopyMap(expectedCredentials)
+	if r.expireErr != nil {
+		return false, r.expireErr
+	}
+	if r.expireConfigured {
+		return r.expireApplied, nil
+	}
+	return true, nil
 }
 
 type tokenCacheInvalidatorRecorder struct {
@@ -215,6 +236,49 @@ func TestRateLimitService_HandleUpstreamError_OAuth401InvalidatorError(t *testin
 	require.Equal(t, 1, repo.tempCalls)
 	require.Equal(t, 0, repo.updateCredentialsCalls)
 	require.Len(t, invalidator.accounts, 1)
+}
+
+func TestRateLimitService_HandleUpstreamError_OpenAI401CASExpiresCredentials(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{expireApplied: true, expireConfigured: true}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	account := &Account{
+		ID:       104,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":   "token",
+			"refresh_token":  "rt-104",
+			"expires_at":     time.Now().Add(time.Hour).Unix(),
+			"_token_version": int64(7),
+		},
+	}
+
+	shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
+
+	require.True(t, shouldDisable)
+	require.Equal(t, 1, repo.expireCalls)
+	require.Equal(t, int64(7), repo.lastExpireCredentials["_token_version"])
+	require.Equal(t, 1, repo.tempCalls)
+	require.Equal(t, int64(0), account.Credentials["expires_at"], "in-memory account should also force request-path refresh")
+	require.Zero(t, repo.setErrorCalls)
+}
+
+func TestRateLimitService_HandleUpstreamError_OpenAI401CASSkipAvoidsStaleTempUnschedulable(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{expireApplied: false, expireConfigured: true}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	account := &Account{
+		ID:          105,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{"access_token": "old", "refresh_token": "rt-105", "_token_version": int64(1)},
+	}
+
+	shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
+
+	require.False(t, shouldDisable, "stale 401 belongs to a replaced token version and should not remove the refreshed account")
+	require.Equal(t, 1, repo.expireCalls)
+	require.Zero(t, repo.tempCalls, "stale 401 must not temp-unschedule a concurrently refreshed account")
+	require.Zero(t, repo.setErrorCalls)
 }
 
 func TestRateLimitService_HandleUpstreamError_NonOAuth401(t *testing.T) {

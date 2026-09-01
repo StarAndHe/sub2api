@@ -223,6 +223,61 @@ func TestAccountRepository_SetGrokOAuthRefreshTempUnschedulableIfCredentialsUnch
 	require.Contains(t, normalized, "INSERT INTO scheduler_outbox")
 }
 
+func TestAccountRepository_ExpireOpenAIOAuthCredentialsIfUnchanged_UsesExactCredentialCAS(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+	applied, err := repo.ExpireOpenAIOAuthCredentialsIfUnchanged(
+		context.Background(),
+		42,
+		map[string]any{"access_token": "observed", "refresh_token": "refresh", "_token_version": int64(9)},
+	)
+
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.Len(t, exec.execQueries, 1)
+	normalized := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, normalized, "WITH updated AS")
+	require.Contains(t, normalized, "jsonb_set(a.credentials, '{expires_at}', to_jsonb(0), true)")
+	require.Contains(t, normalized, "a.platform = $2")
+	require.Contains(t, normalized, "a.type = $3")
+	require.Contains(t, normalized, "a.credentials = $4::jsonb")
+	require.Contains(t, normalized, "INSERT INTO scheduler_outbox")
+	require.Len(t, exec.execArgs[0], 5)
+	require.Equal(t, service.PlatformOpenAI, exec.execArgs[0][1])
+	require.Equal(t, service.AccountTypeOAuth, exec.execArgs[0][2])
+	require.Contains(t, exec.execArgs[0][3], `"_token_version":9`)
+}
+
+func TestAccountRepository_UpdateOpenAIOAuthCredentialsAndClearAuthErrorIfUnchanged_UsesCASAndClearsAuthState(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+	applied, err := repo.UpdateOpenAIOAuthCredentialsAndClearAuthErrorIfUnchanged(
+		context.Background(),
+		43,
+		map[string]any{"refresh_token": "attempted", "_token_version": int64(9)},
+		map[string]any{"refresh_token": "rotated", "_token_version": int64(10)},
+	)
+
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.Len(t, exec.execQueries, 1)
+	normalized := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, normalized, "WITH updated AS")
+	require.Contains(t, normalized, "credentials = $1::jsonb")
+	require.Contains(t, normalized, "status = $2")
+	require.Contains(t, normalized, "error_message = CASE")
+	require.Contains(t, normalized, "temp_unschedulable_until = CASE")
+	require.Contains(t, normalized, "temp_unschedulable_reason = CASE")
+	require.Contains(t, normalized, "a.credentials = $6::jsonb")
+	require.Contains(t, normalized, "INSERT INTO scheduler_outbox")
+	require.Len(t, exec.execArgs[0], 7)
+	require.Equal(t, service.StatusActive, exec.execArgs[0][1])
+	require.Equal(t, service.PlatformOpenAI, exec.execArgs[0][3])
+	require.Equal(t, service.AccountTypeOAuth, exec.execArgs[0][4])
+}
+
 func TestAccountRepository_UpdateGrokOAuthCredentialsIfUnchanged_UsesExactAttemptStateAndAtomicOutbox(t *testing.T) {
 	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
 	repo := newAccountRepositoryWithSQL(nil, exec, nil)

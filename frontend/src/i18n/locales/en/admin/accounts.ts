@@ -137,6 +137,8 @@ export default {
         rateLimited: 'Rate Limited',
         overloaded: 'Overloaded',
         tempUnschedulable: 'Temp Unschedulable',
+        recoverableAuthExpired: 'Recoverable Auth Expired',
+        needsReauth: 'Needs Re-login',
         quotaExceeded: 'Quota Exceeded',
         unschedulable: 'Unschedulable',
         rateLimitedUntil: 'Rate limited and removed from scheduling. Auto resumes at {time}',
@@ -152,6 +154,7 @@ export default {
       columns: {
         name: 'Name',
         id: 'Account ID',
+        membership: 'Membership',
         platformType: 'Platform/Type',
         platform: 'Platform',
         type: 'Type',
@@ -276,6 +279,9 @@ export default {
       setPrivacy: 'Set Privacy',
       subscriptionAbnormal: 'Abnormal',
       subscriptionExpires: 'Expires',
+      membership: {
+        unknown: 'Unknown'
+      },
       // Capacity status tooltips
       capacity: {
         windowCost: {

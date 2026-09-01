@@ -258,11 +258,12 @@
           <template #cell-platform_type="{ row }">
             <div class="flex min-w-0 flex-col gap-1">
               <div class="flex flex-wrap items-center gap-1">
-                <PlatformTypeBadge :platform="row.platform" :type="row.type"
+                <PlatformTypeBadge
+                  :platform="row.platform"
+                  :type="row.type"
                   :auth-mode="getOpenAIAuthMode(row)"
-                  :plan-type="getAccountPlanType(row)"
-                  :privacy-mode="row.extra?.privacy_mode || row.parent_privacy_mode"
-                  :subscription-expires-at="row.credentials?.subscription_expires_at || row.parent_subscription_expires_at" />
+                  :show-plan="false"
+                />
                 <span
                   v-if="getAntigravityTierLabel(row)"
                   :class="['inline-block rounded px-1.5 py-0.5 text-[10px] font-medium', getAntigravityTierClass(row)]"
@@ -282,6 +283,15 @@
                 <span>{{ getOpenAICompactMeta(row)?.label }}</span>
               </div>
             </div>
+          </template>
+          <template #cell-membership="{ row }">
+            <AccountMembershipBadge
+              :platform="row.platform"
+              :type="row.type"
+              :plan-type="getAccountPlanType(row)"
+              :privacy-mode="row.extra?.privacy_mode || row.parent_privacy_mode"
+              :subscription-expires-at="row.credentials?.subscription_expires_at || row.parent_subscription_expires_at"
+            />
           </template>
           <template #cell-capacity="{ row }">
             <AccountCapacityCell :account="row" />
@@ -519,6 +529,7 @@ import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
+import AccountMembershipBadge from '@/components/account/AccountMembershipBadge.vue'
 import UpstreamBillingRateCell from '@/components/account/UpstreamBillingRateCell.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -1606,10 +1617,11 @@ const allColumns = computed(() => {
   const c = [
     { key: 'select', label: '', sortable: false },
     { key: 'name', label: t('admin.accounts.columns.name'), sortable: true },
-    { key: 'id', label: t('admin.accounts.columns.id'), sortable: true },
-    { key: 'platform_type', label: t('admin.accounts.columns.platformType'), sortable: false },
-    { key: 'capacity', label: t('admin.accounts.columns.capacity'), sortable: false },
     { key: 'status', label: t('admin.accounts.columns.status'), sortable: true },
+    { key: 'membership', label: t('admin.accounts.columns.membership'), sortable: false },
+    { key: 'platform_type', label: t('admin.accounts.columns.platformType'), sortable: false },
+    { key: 'id', label: t('admin.accounts.columns.id'), sortable: true },
+    { key: 'capacity', label: t('admin.accounts.columns.capacity'), sortable: false },
     { key: 'schedulable', label: t('admin.accounts.columns.schedulable'), sortable: true },
     { key: 'today_stats', label: t('admin.accounts.columns.todayStats'), sortable: false }
   ]

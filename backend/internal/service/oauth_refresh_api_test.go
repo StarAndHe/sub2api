@@ -18,18 +18,20 @@ import (
 // refreshAPIAccountRepo implements AccountRepository for OAuthRefreshAPI tests.
 type refreshAPIAccountRepo struct {
 	mockAccountRepoForGemini
-	account                 *Account // returned by GetByID
-	getByIDErr              error
-	getByIDCalls            int
-	getByIDErrAfterCall     int
-	getByIDErrAfterCallErr  error
-	updateErr               error
-	updateCalls             int
-	updateCredentialsCalls  int
-	successCASCalls         int
-	beforeSuccessCAS        func(*refreshAPIAccountRepo)
-	lastExpectedCredentials map[string]any
-	lastExpectedProxyID     *int64
+	account                      *Account // returned by GetByID
+	getByIDErr                   error
+	getByIDCalls                 int
+	getByIDErrAfterCall          int
+	getByIDErrAfterCallErr       error
+	updateErr                    error
+	updateCalls                  int
+	updateCredentialsCalls       int
+	successCASCalls              int
+	openAISuccessCASCalls        int
+	openAISuccessCASClearedError bool
+	beforeSuccessCAS             func(*refreshAPIAccountRepo)
+	lastExpectedCredentials      map[string]any
+	lastExpectedProxyID          *int64
 }
 
 func (r *refreshAPIAccountRepo) GetByID(_ context.Context, _ int64) (*Account, error) {
@@ -100,6 +102,35 @@ func (r *refreshAPIAccountRepo) UpdateGrokOAuthCredentialsIfUnchanged(
 	r.updateCalls++
 	r.updateCredentialsCalls++
 	r.account.Credentials = shallowCopyMap(credentials)
+	return true, nil
+}
+
+func (r *refreshAPIAccountRepo) UpdateOpenAIOAuthCredentialsAndClearAuthErrorIfUnchanged(
+	_ context.Context,
+	id int64,
+	expectedCredentials map[string]any,
+	credentials map[string]any,
+) (bool, error) {
+	r.openAISuccessCASCalls++
+	r.lastExpectedCredentials = shallowCopyMap(expectedCredentials)
+	if r.beforeSuccessCAS != nil {
+		r.beforeSuccessCAS(r)
+	}
+	if r.updateErr != nil {
+		return false, r.updateErr
+	}
+	if r.account == nil || r.account.ID != id || r.account.Platform != PlatformOpenAI ||
+		r.account.Type != AccountTypeOAuth || !reflect.DeepEqual(r.account.Credentials, expectedCredentials) {
+		return false, nil
+	}
+	r.updateCalls++
+	r.updateCredentialsCalls++
+	r.account.Credentials = shallowCopyMap(credentials)
+	r.account.Status = StatusActive
+	r.account.ErrorMessage = ""
+	r.account.TempUnschedulableUntil = nil
+	r.account.TempUnschedulableReason = ""
+	r.openAISuccessCASClearedError = true
 	return true, nil
 }
 
@@ -206,6 +237,66 @@ func TestRefreshIfNeeded_Success(t *testing.T) {
 	require.Equal(t, 1, repo.updateCredentialsCalls)
 	require.Equal(t, 1, cache.releaseCalls) // lock released
 	require.Equal(t, 1, executor.refreshCalls)
+}
+
+func TestRefreshIfNeeded_OpenAIForcedRefreshClearsRecoverableAuthErrorWithCAS(t *testing.T) {
+	until := time.Now().Add(10 * time.Minute)
+	account := &Account{
+		ID:                      88,
+		Platform:                PlatformOpenAI,
+		Type:                    AccountTypeOAuth,
+		Status:                  StatusError,
+		ErrorMessage:            "token_expired: access token expired",
+		TempUnschedulableUntil:  &until,
+		TempUnschedulableReason: "OAuth 401",
+		Credentials:             map[string]any{"access_token": "old", "refresh_token": "refresh", "_token_version": int64(1)},
+	}
+	repo := &refreshAPIAccountRepo{account: account}
+	cache := &refreshAPICacheStub{lockResult: true}
+	executor := &refreshAPIExecutorStub{
+		needsRefresh: false,
+		credentials:  map[string]any{"access_token": "new", "refresh_token": "refresh2"},
+	}
+
+	result, err := NewOAuthRefreshAPI(repo, cache).RefreshIfNeeded(context.Background(), account, executor, time.Hour, WithOAuthRefreshForce())
+
+	require.NoError(t, err)
+	require.True(t, result.Refreshed)
+	require.Equal(t, 1, executor.refreshCalls, "force refresh bypasses inactive and NeedsRefresh gates")
+	require.Equal(t, 1, repo.openAISuccessCASCalls)
+	require.True(t, repo.openAISuccessCASClearedError)
+	require.Equal(t, StatusActive, repo.account.Status)
+	require.Empty(t, repo.account.ErrorMessage)
+	require.Nil(t, repo.account.TempUnschedulableUntil)
+	require.Empty(t, repo.account.TempUnschedulableReason)
+	require.Equal(t, "new", repo.account.GetCredential("access_token"))
+}
+
+func TestRefreshIfNeeded_OpenAISuccessCASSkipReturnsConcurrentCredentials(t *testing.T) {
+	account := &Account{
+		ID:          89,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusError,
+		Credentials: map[string]any{"access_token": "old", "refresh_token": "refresh", "_token_version": int64(1)},
+	}
+	repo := &refreshAPIAccountRepo{
+		account: account,
+		beforeSuccessCAS: func(r *refreshAPIAccountRepo) {
+			r.account.Credentials = map[string]any{"access_token": "concurrent", "refresh_token": "refresh3", "_token_version": int64(3)}
+			r.account.Status = StatusActive
+		},
+	}
+	cache := &refreshAPICacheStub{lockResult: true}
+	executor := &refreshAPIExecutorStub{needsRefresh: true, credentials: map[string]any{"access_token": "new"}}
+
+	result, err := NewOAuthRefreshAPI(repo, cache).RefreshIfNeeded(context.Background(), account, executor, time.Hour, WithOAuthRefreshForce())
+
+	require.NoError(t, err)
+	require.False(t, result.Refreshed)
+	require.Equal(t, 1, repo.openAISuccessCASCalls)
+	require.Equal(t, "concurrent", result.Account.GetCredential("access_token"))
+	require.Equal(t, "refresh3", result.Account.GetOpenAIRefreshToken())
 }
 
 func TestRefreshIfNeeded_UpdateCredentialsPreservesRateLimitState(t *testing.T) {

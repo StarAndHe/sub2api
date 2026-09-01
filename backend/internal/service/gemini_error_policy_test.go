@@ -123,7 +123,7 @@ func TestCheckErrorPolicy_GeminiAccounts(t *testing.T) {
 			expected:   ErrorPolicyTempUnscheduled,
 		},
 		{
-			name: "gemini_apikey_temp_unschedulable_401_second_hit_returns_none",
+			name: "gemini_apikey_temp_unschedulable_401_second_hit_stays_temp",
 			account: &Account{
 				ID:                      105,
 				Type:                    AccountTypeAPIKey,
@@ -142,7 +142,7 @@ func TestCheckErrorPolicy_GeminiAccounts(t *testing.T) {
 			},
 			statusCode: 401,
 			body:       []byte(`unauthorized`),
-			expected:   ErrorPolicyNone,
+			expected:   ErrorPolicyTempUnscheduled,
 		},
 		{
 			name: "gemini_custom_codes_override_temp_unschedulable",

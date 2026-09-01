@@ -1180,10 +1180,20 @@ func (r *accountRepository) ListOAuthRefreshCandidatePage(ctx context.Context, o
 			AND schedulable = TRUE
 			AND platform = ANY($1)
 			AND id > $2`
-	if options.ActiveOnly {
+	if options.OpenAIRecoverableAuthErrorOnly {
 		query += `
-			AND status = 'active'`
+				AND platform = 'openai'
+				AND status = 'error'
+				AND schedulable = TRUE
+				AND error_message ILIKE '%token_expired%'
+				AND error_message NOT ILIKE '%token_invalidated%'
+				AND error_message NOT ILIKE '%token_revoked%'
+				AND error_message NOT ILIKE '%invalid_grant%'`
+	} else if options.ActiveOnly {
+		query += `
+				AND status = 'active'`
 	}
+
 	if options.IncludeSetupToken {
 		query += `
 			AND type IN ('oauth', 'setup-token')`
@@ -1431,6 +1441,149 @@ func (r *accountRepository) SetGrokOAuthErrorIfCredentialsUnchanged(
 		service.PlatformGrok,
 		service.AccountTypeOAuth,
 		service.StatusActive,
+		string(expectedJSON),
+		service.SchedulerOutboxEventAccountChanged,
+	)
+	if err != nil {
+		return false, err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rowsAffected == 0 {
+		return false, nil
+	}
+	r.syncSchedulerAccountSnapshotDetached(ctx, id)
+	return true, nil
+}
+
+// ExpireOpenAIOAuthCredentialsIfUnchanged marks the observed OpenAI OAuth
+// credential version expired so the next token-provider pass must refresh it.
+// The exact JSONB match prevents a stale 401 response from mutating credentials
+// already replaced by another worker or a fresh admin authorization.
+func (r *accountRepository) ExpireOpenAIOAuthCredentialsIfUnchanged(
+	ctx context.Context,
+	id int64,
+	expectedCredentials map[string]any,
+) (bool, error) {
+	if r == nil || r.sql == nil {
+		return false, errors.New("account repository SQL executor is not configured")
+	}
+	expectedJSON, err := json.Marshal(normalizeJSONMap(expectedCredentials))
+	if err != nil {
+		return false, err
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+		UPDATE accounts AS a
+		SET credentials = jsonb_set(a.credentials, '{expires_at}', to_jsonb(0), true),
+			updated_at = NOW()
+		WHERE a.id = $1
+			AND a.deleted_at IS NULL
+			AND a.platform = $2
+			AND a.type = $3
+			AND a.status = 'active'
+			AND a.schedulable IS TRUE
+			AND a.credentials = $4::jsonb
+		RETURNING a.id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $5, updated.id, NULL, NULL FROM updated
+	`,
+		id,
+		service.PlatformOpenAI,
+		service.AccountTypeOAuth,
+		string(expectedJSON),
+		service.SchedulerOutboxEventAccountChanged,
+	)
+	if err != nil {
+		return false, err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rowsAffected == 0 {
+		return false, nil
+	}
+	r.syncSchedulerAccountSnapshotDetached(ctx, id)
+	return true, nil
+}
+
+// UpdateOpenAIOAuthCredentialsAndClearAuthErrorIfUnchanged persists a
+// successful OpenAI OAuth refresh only if the attempted credential document is
+// still current, then clears auth-error and temporary-unschedulable state.
+func (r *accountRepository) UpdateOpenAIOAuthCredentialsAndClearAuthErrorIfUnchanged(
+	ctx context.Context,
+	id int64,
+	expectedCredentials map[string]any,
+	credentials map[string]any,
+) (bool, error) {
+	if r == nil || r.sql == nil {
+		return false, errors.New("account repository SQL executor is not configured")
+	}
+	expectedJSON, err := json.Marshal(normalizeJSONMap(expectedCredentials))
+	if err != nil {
+		return false, err
+	}
+	credentialsJSON, err := json.Marshal(normalizeJSONMap(credentials))
+	if err != nil {
+		return false, err
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+		UPDATE accounts AS a
+		SET credentials = $1::jsonb,
+			status = $2,
+			error_message = CASE
+				WHEN a.status = 'error'
+					AND a.error_message ILIKE '%token_expired%'
+					AND a.error_message NOT ILIKE '%token_invalidated%'
+					AND a.error_message NOT ILIKE '%token_revoked%'
+					AND a.error_message NOT ILIKE '%invalid_grant%'
+				THEN ''
+				ELSE a.error_message
+			END,
+			temp_unschedulable_until = CASE
+				WHEN a.temp_unschedulable_reason ILIKE '%401%'
+					OR a.temp_unschedulable_reason ILIKE '%token_expired%'
+				THEN NULL
+				ELSE a.temp_unschedulable_until
+			END,
+			temp_unschedulable_reason = CASE
+				WHEN a.temp_unschedulable_reason ILIKE '%401%'
+					OR a.temp_unschedulable_reason ILIKE '%token_expired%'
+				THEN NULL
+				ELSE a.temp_unschedulable_reason
+			END,
+			updated_at = NOW()
+		WHERE a.id = $3
+			AND a.deleted_at IS NULL
+			AND a.platform = $4
+			AND a.type = $5
+			AND a.schedulable IS TRUE
+			AND a.credentials = $6::jsonb
+			AND (
+				a.status = 'active'
+				OR (
+					a.status = 'error'
+					AND a.error_message ILIKE '%token_expired%'
+					AND a.error_message NOT ILIKE '%token_invalidated%'
+					AND a.error_message NOT ILIKE '%token_revoked%'
+					AND a.error_message NOT ILIKE '%invalid_grant%'
+				)
+			)
+		RETURNING a.id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $7, updated.id, NULL, NULL FROM updated
+	`,
+		string(credentialsJSON),
+		service.StatusActive,
+		id,
+		service.PlatformOpenAI,
+		service.AccountTypeOAuth,
 		string(expectedJSON),
 		service.SchedulerOutboxEventAccountChanged,
 	)

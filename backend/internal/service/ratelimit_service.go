@@ -50,6 +50,10 @@ type AccountRecoveryOptions struct {
 	InvalidateToken bool
 }
 
+type openAIOAuthCredentialExpirer interface {
+	ExpireOpenAIOAuthCredentialsIfUnchanged(ctx context.Context, id int64, expectedCredentials map[string]any) (bool, error)
+}
+
 type geminiUsageCacheEntry struct {
 	windowStart time.Time
 	cachedAt    time.Time
@@ -389,16 +393,22 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 				shouldDisable = true
 				break
 			}
-			// 2. 临时不可调度，替代 SetError（保持 status=active 让刷新服务能拾取）
-			// 注意：此处不再写回 account.Credentials/expires_at。
-			// 原实现使用请求开始时的 account 快照整列覆盖 credentials JSONB（见
-			// persistAccountCredentials → accountRepository.UpdateCredentials → SetCredentials），
-			// 在另一个 worker 刚刷新完 refresh_token 的窄窗口内会把新 refresh_token 回滚为旧值，
-			// 导致下一周期用旧 refresh_token 调上游拿到 invalid_grant 后，
-			// tryRecoverFromRefreshRace 重读 DB 发现 currentRT == usedRT 也救不回来，账号被错误 disable。
-			// 这里仅依赖 InvalidateToken + SetTempUnschedulable 让账号在冷却期内不被调度，
-			// 冷却结束后由 token_provider 的 NeedsRefresh / token_refresh_service 走带分布式锁的正路刷新。
+			if authAccount.Platform == PlatformOpenAI {
+				if expirer, ok := s.accountRepo.(openAIOAuthCredentialExpirer); ok {
+					applied, err := expirer.ExpireOpenAIOAuthCredentialsIfUnchanged(ctx, authAccount.ID, authAccount.Credentials)
+					if err != nil {
+						slog.Warn("oauth_401_force_expire_credentials_failed", "account_id", authAccount.ID, "error", err)
+					} else if !applied {
+						slog.Info("oauth_401_skipped_temp_unschedulable_stale_credentials", "account_id", authAccount.ID)
+						break
+					} else if authAccount.Credentials != nil {
+						authAccount.Credentials["expires_at"] = int64(0)
+					}
+				}
+			}
+
 			msg := "Authentication failed (401): invalid or expired credentials"
+
 			if upstreamMsg != "" {
 				msg = "OAuth 401: " + upstreamMsg
 			}
@@ -2291,23 +2301,10 @@ func (s *RateLimitService) tryTempUnschedulable(ctx context.Context, account *Ac
 	if !account.IsTempUnschedulableEnabled() {
 		return false
 	}
-	// 401 首次命中可临时不可调度（给 token 刷新窗口）；
-	// 若历史上已因 401 进入过临时不可调度，则本次应升级为 error（返回 false 交由默认错误逻辑处理）。
-	// Antigravity 跳过：其 401 由 applyErrorPolicy 的 temp_unschedulable_rules 自行控制，无需升级逻辑。
-	if statusCode == http.StatusUnauthorized && account.Platform != PlatformAntigravity {
-		reason := account.TempUnschedulableReason
-		// 缓存可能没有 reason，从 DB 回退读取
-		if reason == "" {
-			if dbAcc, err := s.accountRepo.GetByID(ctx, account.ID); err == nil && dbAcc != nil {
-				reason = dbAcc.TempUnschedulableReason
-			}
-		}
-		if wasTempUnschedByStatusCode(reason, statusCode) {
-			slog.Info("401_escalated_to_error", "account_id", account.ID,
-				"reason", "previous temp-unschedulable was also 401")
-			return false
-		}
-	}
+	// OAuth 401 不再因为“前一次临时不可调度也是 401”直接升级为 error。
+	// 只要账号仍有 refresh_token，就继续给后台刷新/请求前刷新机会；真正永久失效
+	// 由 token_invalidated/token_revoked/invalid_grant 或缺失 refresh_token 分支判定。
+
 	for _, match := range matchTempUnschedulableRules(account, statusCode, responseBody) {
 		if s.triggerTempUnschedulable(ctx, account, match.rule, match.ruleIndex, statusCode, match.matchedKeyword, responseBody, tempUnschedulableModel(ctx, requestedModel)) {
 			return true

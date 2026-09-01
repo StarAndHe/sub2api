@@ -281,6 +281,30 @@ const hasError = computed(() => {
   return props.account.status === 'error'
 })
 
+const normalizedErrorMessage = computed(() =>
+  (props.account.error_message || '').toLowerCase()
+)
+
+const isRecoverableAuthExpired = computed(() => {
+  if (!hasError.value || props.account.platform !== 'openai' || props.account.type !== 'oauth') return false
+  const message = normalizedErrorMessage.value
+  return message.includes('token_expired') &&
+    !message.includes('token_invalidated') &&
+    !message.includes('token_revoked') &&
+    !message.includes('invalid_grant')
+})
+
+const needsReauth = computed(() => {
+  if (!hasError.value) return false
+  const message = normalizedErrorMessage.value
+  return message.includes('token_invalidated') ||
+    message.includes('token_revoked') ||
+    message.includes('invalid_grant') ||
+    message.includes('refresh_token missing') ||
+    message.includes('no refresh_token') ||
+    message.includes('unauthorized')
+})
+
 const isQuotaExceeded = computed(() => {
   const exceeded = (used?: number | null, limit?: number | null) =>
     typeof limit === 'number' && limit > 0 && typeof used === 'number' && used >= limit
@@ -315,6 +339,12 @@ const tempUnschedRecoveryText = computed(() => {
 
 // Computed: status badge class
 const statusClass = computed(() => {
+  if (isRecoverableAuthExpired.value) {
+    return 'badge-warning'
+  }
+  if (needsReauth.value) {
+    return 'badge-danger'
+  }
   if (hasError.value) {
     return 'badge-danger'
   }
@@ -335,6 +365,12 @@ const statusClass = computed(() => {
 
 // Computed: status text
 const statusText = computed(() => {
+  if (isRecoverableAuthExpired.value) {
+    return t('admin.accounts.status.recoverableAuthExpired')
+  }
+  if (needsReauth.value) {
+    return t('admin.accounts.status.needsReauth')
+  }
   if (hasError.value) {
     return t('admin.accounts.status.error')
   }

@@ -22,13 +22,14 @@ const AccountPrivacyModeUnsetFilter = "__unset__"
 // accounts. Candidate platforms are supplied by TokenRefreshService's refresher
 // registry so repository eligibility cannot drift from registered providers.
 type OAuthRefreshPageOptions struct {
-	Platforms            []string
-	AfterID              int64
-	Limit                int
-	ActiveOnly           bool
-	IncludeSetupToken    bool
-	RequireRefreshToken  bool
-	ExcludeRetryCooldown bool
+	Platforms                      []string
+	AfterID                        int64
+	Limit                          int
+	ActiveOnly                     bool
+	IncludeSetupToken              bool
+	RequireRefreshToken            bool
+	ExcludeRetryCooldown           bool
+	OpenAIRecoverableAuthErrorOnly bool
 }
 
 // OAuthRefreshCandidatePage keeps cursor metadata from the raw SQL ID page.
