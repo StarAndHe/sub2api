@@ -2314,22 +2314,6 @@ func (s *RateLimitService) tryTempUnschedulable(ctx context.Context, account *Ac
 	return false
 }
 
-func wasTempUnschedByStatusCode(reason string, statusCode int) bool {
-	if statusCode <= 0 {
-		return false
-	}
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return false
-	}
-
-	var state TempUnschedState
-	if err := json.Unmarshal([]byte(reason), &state); err != nil {
-		return false
-	}
-	return state.StatusCode == statusCode
-}
-
 func matchTempUnschedKeyword(bodyLower string, keywords []string) string {
 	if bodyLower == "" {
 		return ""
