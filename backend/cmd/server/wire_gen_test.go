@@ -65,6 +65,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // authCacheInvalidationWorker
 		schedulerSnapshotSvc,
 		tokenRefreshSvc,
+		nil, // rateLimitPatrol
 		accountExpirySvc,
 		codexVersionSyncSvc,
 		proxyExpirySvc,
