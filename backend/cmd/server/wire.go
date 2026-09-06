@@ -87,6 +87,7 @@ func provideCleanup(
 	authCacheInvalidationWorker *service.AuthCacheInvalidationWorker,
 	schedulerSnapshot *service.SchedulerSnapshotService,
 	tokenRefresh *service.TokenRefreshService,
+	rateLimitPatrol *service.OpenAIStaleRateLimitPatrolService,
 	accountExpiry *service.AccountExpiryService,
 	codexVersionSync *service.OpenAICodexVersionSyncService,
 	proxyExpiry *service.ProxyExpiryService,
@@ -232,6 +233,12 @@ func provideCleanup(
 			}},
 			{"TokenRefreshService", func() error {
 				tokenRefresh.Stop()
+				return nil
+			}},
+			{"OpenAIStaleRateLimitPatrolService", func() error {
+				if rateLimitPatrol != nil {
+					rateLimitPatrol.Stop()
+				}
 				return nil
 			}},
 			{"AccountExpiryService", func() error {

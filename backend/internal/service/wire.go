@@ -329,6 +329,22 @@ func ProvideAccountExpiryService(accountRepo AccountRepository) *AccountExpirySe
 	return svc
 }
 
+// ProvideOpenAIStaleRateLimitPatrolService creates and starts the background
+// patrol that periodically probes OpenAI OAuth accounts blocked only by a 429
+// rate limit, so an external quota reset is picked up without an open admin page.
+func ProvideOpenAIStaleRateLimitPatrolService(
+	cfg *config.Config,
+	openAIGatewayService *OpenAIGatewayService,
+) *OpenAIStaleRateLimitPatrolService {
+	var patrolCfg *config.RateLimitPatrolConfig
+	if cfg != nil {
+		patrolCfg = &cfg.RateLimitPatrol
+	}
+	svc := NewOpenAIStaleRateLimitPatrolService(patrolCfg, openAIGatewayService)
+	svc.Start()
+	return svc
+}
+
 // ProvideOpenAICodexVersionSyncService creates and starts OpenAICodexVersionSyncService.
 // 出站 Codex 身份的版本号靠它跟随官方发布，无需为了跟版本而发新版本；面板可关闭。
 func ProvideOpenAICodexVersionSyncService(
@@ -829,6 +845,7 @@ var ProviderSet = wire.NewSet(
 	ProvideUpdateService,
 	ProvideTokenRefreshService,
 	wire.Bind(new(GrokOAuthReconciler), new(*TokenRefreshService)),
+	ProvideOpenAIStaleRateLimitPatrolService,
 	ProvideAccountExpiryService,
 	ProvideOpenAICodexVersionSyncService,
 	ProvideProxyExpiryService,

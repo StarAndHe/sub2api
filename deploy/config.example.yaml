@@ -775,6 +775,29 @@ token_refresh:
   cycle_timeout_seconds: 240
 
 # =============================================================================
+# OpenAI OAuth 429 rate-limit patrol
+# OpenAI OAuth 429 限流账号后台巡查
+#
+# Periodically probes OpenAI OAuth accounts that are blocked only by a 429 rate
+# limit. If the upstream quota was reset externally (e.g. from the ChatGPT app),
+# the probe succeeds and the stale rate limit is cleared so the account returns
+# to the schedulable pool without requiring an open admin page.
+# 周期性探测「仅被 429 限流挡住」的 OpenAI OAuth 账号：若上游额度已被外部重置
+# （例如在 ChatGPT 客户端重置），探测成功即清除旧限流，账号无需打开管理页面
+# 也会在下一个巡查周期自动回到可调度池。
+# =============================================================================
+rate_limit_patrol:
+  # Whether the background patrol is enabled (default true)
+  # 是否启用后台巡查（默认 true）
+  enabled: true
+  # Patrol interval in minutes (default 30)
+  # 巡查间隔（分钟，默认 30）
+  check_interval_minutes: 30
+  # Maximum number of accounts probed in one cycle (0 = unlimited, default 20)
+  # 每轮巡查最多探测的账号数（0 表示不限制，默认 20）
+  max_accounts_per_cycle: 20
+
+# =============================================================================
 # API Key Auth Cache Configuration
 # API Key 认证缓存配置
 # =============================================================================

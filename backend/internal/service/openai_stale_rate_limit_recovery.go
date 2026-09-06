@@ -319,3 +319,95 @@ func observedOpenAIModelRateLimits(ctx context.Context, account *Account, reques
 	}
 	return result
 }
+
+// PatrolRecoverStaleOpenAIRateLimits 后台巡查一轮：列出所有 active + schedulable 的
+// OpenAI OAuth 账号（跨分组），找出「当前仍被账号级 429 挡住」的候选，逐个探测上游；
+// 上游已能正常完成响应时按既有 CAS 语义清除旧限流并同步调度缓存。返回 (探测数, 恢复数)。
+//
+// 与请求路径的 tryRecoverStaleOpenAIRateLimit 区别：
+//   - 没有请求模型上下文，候选判定只关注账号级限流（RateLimitedAt/ResetAt），
+//     不检查具体请求模型是否支持——429 是账号级额度窗口，与请求模型无关；
+//   - 刻意不因 shouldAutoPauseOpenAIAccountByQuota 排除候选：外部重置额度后本地
+//     快照可能仍显示耗尽，若因 auto-pause 跳过则永远不会被探测、永远无法自愈。
+//
+// maxAccounts <= 0 表示不限制本轮探测数量。探测模型沿用页面额度刷新的
+// selectResponsesProbeModel（账号映射的上游模型，空映射回退 DefaultTestModel）。
+func (s *OpenAIGatewayService) PatrolRecoverStaleOpenAIRateLimits(ctx context.Context, maxAccounts int) (int, int, error) {
+	if s == nil || s.accountRepo == nil || s.httpUpstream == nil {
+		return 0, 0, nil
+	}
+	accounts, err := s.accountRepo.ListModelAvailabilityCandidates(ctx, nil, []string{PlatformOpenAI}, true)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	now := time.Now()
+	candidates := make([]*Account, 0, len(accounts))
+	for i := range accounts {
+		account := &accounts[i]
+		if !s.isOpenAI429PatrolCandidate(account, now) {
+			continue
+		}
+		candidates = append(candidates, account)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		if left.Priority != right.Priority {
+			return left.Priority < right.Priority
+		}
+		return left.ID < right.ID
+	})
+
+	probed := 0
+	recovered := 0
+	for _, account := range candidates {
+		if maxAccounts > 0 && probed >= maxAccounts {
+			break
+		}
+		if !s.claimOpenAIStaleRateLimitRecoveryProbe(account.ID, now) {
+			continue
+		}
+		probed++
+		probeModel := selectResponsesProbeModel(account)
+		ok, probeErr := s.probeAndRecoverOpenAIAccount(ctx, account, probeModel)
+		if probeErr != nil {
+			slog.Warn("openai_rate_limit_patrol.probe_failed",
+				"account_id", account.ID,
+				"model", probeModel,
+				"error", probeErr,
+			)
+			continue
+		}
+		if ok {
+			recovered++
+			slog.Info("openai_rate_limit_patrol.account_recovered", "account_id", account.ID, "model", probeModel)
+		}
+	}
+	return probed, recovered, nil
+}
+
+// isOpenAI429PatrolCandidate 判定账号是否为「仅被账号级 429 挡住」的巡查候选。
+// 账号级限流记录（RateLimitedAt/ResetAt）在重置窗口内未过期才算候选；error、
+// 手动停用、过载、401 引起的临时不可调度等其它阻断状态一律不纳入，避免巡查
+// 用额度探测去解除非额度问题。
+func (s *OpenAIGatewayService) isOpenAI429PatrolCandidate(account *Account, now time.Time) bool {
+	if account == nil || !account.IsOpenAIOAuth() || account.IsShadow() || !account.IsActive() || !account.Schedulable {
+		return false
+	}
+	if account.RateLimitedAt == nil || account.RateLimitResetAt == nil {
+		return false
+	}
+	if !now.Before(*account.RateLimitResetAt) {
+		return false
+	}
+	if account.AutoPauseOnExpired && account.ExpiresAt != nil && !now.Before(*account.ExpiresAt) {
+		return false
+	}
+	if account.OverloadUntil != nil && now.Before(*account.OverloadUntil) {
+		return false
+	}
+	if account.TempUnschedulableUntil != nil && now.Before(*account.TempUnschedulableUntil) {
+		return false
+	}
+	return true
+}

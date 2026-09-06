@@ -92,6 +92,7 @@ type Config struct {
 	UsageCleanup            UsageCleanupConfig            `mapstructure:"usage_cleanup"`
 	Concurrency             ConcurrencyConfig             `mapstructure:"concurrency"`
 	TokenRefresh            TokenRefreshConfig            `mapstructure:"token_refresh"`
+	RateLimitPatrol         RateLimitPatrolConfig         `mapstructure:"rate_limit_patrol"`
 	RunMode                 string                        `mapstructure:"run_mode" yaml:"run_mode"`
 	Timezone                string                        `mapstructure:"timezone"` // e.g. "Asia/Shanghai", "UTC"
 	Gemini                  GeminiConfig                  `mapstructure:"gemini"`
@@ -640,6 +641,16 @@ type TokenRefreshConfig struct {
 	AttemptTimeoutSeconds int `mapstructure:"attempt_timeout_seconds"`
 	// 单个后台刷新周期的总超时（秒）
 	CycleTimeoutSeconds int `mapstructure:"cycle_timeout_seconds"`
+}
+
+// RateLimitPatrolConfig OpenAI OAuth 429 限流账号后台巡查配置。
+type RateLimitPatrolConfig struct {
+	// 是否启用后台巡查（默认 true）
+	Enabled bool `mapstructure:"enabled"`
+	// 巡查间隔（分钟），默认 30
+	CheckIntervalMinutes int `mapstructure:"check_interval_minutes"`
+	// 每轮巡查最多探测的账号数（0 表示不限制），默认 20
+	MaxAccountsPerCycle int `mapstructure:"max_accounts_per_cycle"`
 }
 
 type PricingConfig struct {
@@ -2441,6 +2452,11 @@ func setDefaults() {
 	viper.SetDefault("token_refresh.provider_failure_threshold", 3)
 	viper.SetDefault("token_refresh.attempt_timeout_seconds", 15)
 	viper.SetDefault("token_refresh.cycle_timeout_seconds", 240)
+
+	// OpenAI OAuth 429 限流账号后台巡查
+	viper.SetDefault("rate_limit_patrol.enabled", true)
+	viper.SetDefault("rate_limit_patrol.check_interval_minutes", 30) // 默认每30分钟巡查一次
+	viper.SetDefault("rate_limit_patrol.max_accounts_per_cycle", 20)
 
 	// Gemini OAuth - configure via environment variables or config file
 	// GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET
