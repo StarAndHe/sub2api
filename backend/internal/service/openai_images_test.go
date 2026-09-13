@@ -776,7 +776,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthPassesNAndReturnsAllImages(t *te
 	require.Equal(t, "acct-123", upstream.lastReq.Header.Get("chatgpt-account-id"))
 	require.Empty(t, upstream.lastReq.Header.Get("OpenAI-Beta"))
 
-require.Equal(t, openAIImagesResponsesMainModel, gjson.GetBytes(upstream.lastBody, "model").String())
+		require.Equal(t, openAIImagesResponsesMainModel, gjson.GetBytes(upstream.lastBody, "model").String())
 		require.Equal(t, "none", gjson.GetBytes(upstream.lastBody, "reasoning.effort").String())
 		require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
 	require.Equal(t, "image_generation", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
