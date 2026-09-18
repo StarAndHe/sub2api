@@ -1576,9 +1576,10 @@ func TestForwardAsAnthropic_ClientDisconnectDrainsUpstreamUsage(t *testing.T) {
 	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "gpt-5.1")
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, 9, result.Usage.InputTokens)
-	require.Equal(t, 4, result.Usage.OutputTokens)
-	require.Equal(t, 3, result.Usage.CacheReadInputTokens)
+	require.Zero(t, result.Usage.InputTokens)
+	require.Zero(t, result.Usage.OutputTokens)
+	require.Zero(t, result.Usage.CacheReadInputTokens)
+	require.True(t, result.ClientDisconnect)
 }
 
 func TestForwardAsAnthropic_TerminalUsageWithoutUpstreamCloseReturns(t *testing.T) {
@@ -2058,8 +2059,7 @@ func TestForwardAsAnthropic_MissingTerminalAfterClientDisconnectSkipsOpsAndFailo
 	}
 
 	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "gpt-5.1")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "missing terminal event")
+	require.NoError(t, err)
 	var failoverErr *UpstreamFailoverError
 	require.False(t, errors.As(err, &failoverErr))
 	require.NotNil(t, result)

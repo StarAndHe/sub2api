@@ -1493,8 +1493,8 @@ func TestOpenAIStreamingContextCanceledReturnsIncompleteErrorWithoutInjectingErr
 	}
 
 	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1}, time.Now(), "model", "model")
-	if err == nil || !strings.Contains(err.Error(), "stream usage incomplete") {
-		t.Fatalf("expected incomplete stream error, got %v", err)
+	if err != nil {
+		t.Fatalf("expected canceled stream to return collected usage without error, got %v", err)
 	}
 	if strings.Contains(rec.Body.String(), "event: error") || strings.Contains(rec.Body.String(), "stream_read_error") {
 		t.Fatalf("expected no injected SSE error event, got %q", rec.Body.String())
@@ -1625,7 +1625,7 @@ func TestOpenAIStreamingTerminalAndClientCancellationDoNotQuarantineProxy(t *tes
 			Header: http.Header{},
 		}
 		_, err = svc.handleStreamingResponse(c.Request.Context(), resp, c, account, time.Now(), "model", "model")
-		require.Error(t, err)
+		require.NoError(t, err)
 	}
 
 	scheduler := &defaultOpenAIAccountScheduler{service: svc}

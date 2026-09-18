@@ -718,6 +718,16 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 
 	usage := &ClaudeUsage{}
 	var firstTokenMs *int
+	// Close a blocked upstream reader when the client request context is canceled.
+	stopRequestWatcher := make(chan struct{})
+	defer close(stopRequestWatcher)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = resp.Body.Close()
+		case <-stopRequestWatcher:
+		}
+	}()
 	scanner := bufio.NewScanner(resp.Body)
 	// 设置更大的buffer以处理长行
 	maxLineSize := defaultMaxLineSize
@@ -1011,6 +1021,12 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
 			}
 			if ev.err != nil {
+				// A client cancellation closes the upstream body to unblock Scan. The
+				// resulting closed-pipe error is not an upstream failure and must not
+				// trigger account failover.
+				if ctx.Err() != nil {
+					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
+				}
 				if sawTerminalEvent {
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
 				}

@@ -845,6 +845,22 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	var firstTokenMs *int
 	firstChunk := true
 	clientDisconnected := false
+	upstreamCancelled := false
+	requestCancelled := atomic.Bool{}
+	stopRequestWatcher := make(chan struct{})
+	defer close(stopRequestWatcher)
+	ctx := c.Request.Context()
+	go func() {
+		select {
+		case <-ctx.Done():
+			requestCancelled.Store(true)
+			logger.L().Info("openai messages stream: client disconnected, cancelling upstream",
+				zap.String("request_id", requestID),
+			)
+			_ = resp.Body.Close()
+		case <-stopRequestWatcher:
+		}
+	}()
 	clientOutputStarted := false
 	var streamFailoverErr error
 	var streamNonFailoverErr error
@@ -892,6 +908,19 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			out.SearchCount = searchCount
 		}
 		return out
+	}
+
+	cancelUpstream := func(reason string) {
+		if upstreamCancelled {
+			return
+		}
+		upstreamCancelled = true
+		clientDisconnected = true
+		logger.L().Info("openai messages stream: client disconnected, cancelling upstream",
+			zap.String("request_id", requestID),
+			zap.String("reason", reason),
+		)
+		_ = resp.Body.Close()
 	}
 
 	// processDataLine handles a single "data: ..." SSE line from upstream.
@@ -1007,10 +1036,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				}
 				writeStreamHeaders()
 				if _, err := fmt.Fprint(c.Writer, sse); err != nil {
-					clientDisconnected = true
-					logger.L().Info("openai messages stream: client disconnected, continuing to drain upstream for billing",
-						zap.String("request_id", requestID),
-					)
+					cancelUpstream("event write failed")
 					break
 				}
 				clientOutputStarted = true
@@ -1024,6 +1050,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 
 	// finalizeStream sends any remaining Anthropic events and returns the result.
 	finalizeStream := func() (*OpenAIForwardResult, error) {
+		if requestCancelled.Load() || upstreamCancelled {
+			return resultWithUsage(), nil
+		}
 		if streamFailoverErr != nil {
 			return resultWithUsage(), streamFailoverErr
 		}
@@ -1038,10 +1067,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				}
 				writeStreamHeaders()
 				if _, err := fmt.Fprint(c.Writer, sse); err != nil {
-					clientDisconnected = true
-					logger.L().Info("openai messages stream: client disconnected during final flush",
-						zap.String("request_id", requestID),
-					)
+					cancelUpstream("final event write failed")
 					break
 				}
 				clientOutputStarted = true
@@ -1064,6 +1090,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	}
 	missingTerminalErr := func() (*OpenAIForwardResult, error) {
 		result := resultWithUsage()
+		if requestCancelled.Load() || upstreamCancelled {
+			return result, nil
+		}
 		if clientDisconnected {
 			return result, fmt.Errorf("stream usage incomplete: missing terminal event")
 		}
@@ -1089,6 +1118,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	if streamInterval <= 0 && keepaliveInterval <= 0 {
 		var parser openAICompatSSEFrameParser
 		for scanner.Scan() {
+			if requestCancelled.Load() || ctx.Err() != nil {
+				return resultWithUsage(), nil
+			}
 			line := scanner.Text()
 			if isOpenAICompatDoneSentinelLine(line) {
 				return missingTerminalErr()
@@ -1098,10 +1130,21 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				continue
 			}
 			if processFrame(frame) {
+				if upstreamCancelled {
+					return resultWithUsage(), nil
+				}
 				return finalizeStream()
+			}
+			if upstreamCancelled {
+				return resultWithUsage(), nil
 			}
 		}
 		if err := scanner.Err(); err != nil {
+			if requestCancelled.Load() || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				result := resultWithUsage()
+				result.ClientDisconnect = true
+				return result, nil
+			}
 			handleScanErr(err)
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", err)
 		}
@@ -1110,7 +1153,13 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				return missingTerminalErr()
 			}
 			if processFrame(frame) {
+				if upstreamCancelled {
+					return resultWithUsage(), nil
+				}
 				return finalizeStream()
+			}
+			if upstreamCancelled {
+				return resultWithUsage(), nil
 			}
 		}
 		return missingTerminalErr()
@@ -1161,7 +1210,17 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 
 	for {
 		select {
+		case <-ctx.Done():
+			requestCancelled.Store(true)
+			logger.L().Info("openai messages stream: client disconnected, cancelling upstream",
+				zap.String("request_id", requestID),
+			)
+			_ = resp.Body.Close()
+			return resultWithUsage(), nil
 		case ev, ok := <-events:
+			if requestCancelled.Load() || ctx.Err() != nil {
+				return resultWithUsage(), nil
+			}
 			if !ok {
 				// Upstream closed
 				if frame, ok := parser.Finish(); ok {
@@ -1175,6 +1234,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				return missingTerminalErr()
 			}
 			if ev.err != nil {
+				if requestCancelled.Load() || upstreamCancelled {
+					return resultWithUsage(), nil
+				}
 				handleScanErr(ev.err)
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", ev.err)
 			}
@@ -1188,7 +1250,13 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				continue
 			}
 			if processFrame(frame) {
+				if upstreamCancelled {
+					return resultWithUsage(), nil
+				}
 				return finalizeStream()
+			}
+			if upstreamCancelled {
+				return resultWithUsage(), nil
 			}
 
 		case <-intervalCh:
@@ -1216,12 +1284,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			// Send Anthropic-format ping event
 			writeStreamHeaders()
 			if _, err := fmt.Fprint(c.Writer, "event: ping\ndata: {\"type\":\"ping\"}\n\n"); err != nil {
-				// Client disconnected
-				logger.L().Info("openai messages stream: client disconnected during keepalive",
-					zap.String("request_id", requestID),
-				)
-				clientDisconnected = true
-				continue
+				cancelUpstream("keepalive write failed")
+				return resultWithUsage(), nil
 			}
 			clientOutputStarted = true
 			c.Writer.Flush()
